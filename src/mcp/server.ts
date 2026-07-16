@@ -30,6 +30,13 @@ export async function startMcpServer({
   logger
 }: Dependencies): Promise<RunningMcpServer> {
   const app = createMcpExpressApp({ host: config.mcpHost });
+
+  // Simple request logging middleware
+  app.use((req, _res, next) => {
+    logger.info({ method: req.method, url: req.url }, "Incoming request");
+    next();
+  });
+
   const statePath = getMcpStatePath(config);
   
   const transportBySession: Record<string, StreamableHTTPServerTransport> = {};
