@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, dirname } from "node:path";
 import { readFile, realpath, stat } from "node:fs/promises";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
 import { z } from "zod";
-import type { AppConfig } from "../config/config.js";
+import { AppConfig, getMcpStatePath } from "../config/config.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Request, Response } from "express";
@@ -29,7 +30,19 @@ export async function startMcpServer({
   logger
 }: Dependencies): Promise<RunningMcpServer> {
   const app = createMcpExpressApp({ host: config.mcpHost });
+  const statePath = getMcpStatePath(config);
+  
   const transportBySession: Record<string, StreamableHTTPServerTransport> = {};
+
+  const saveSessions = () => {
+    const sessionIds = Object.keys(transportBySession);
+    try {
+      mkdirSync(dirname(statePath), { recursive: true });
+      writeFileSync(statePath, JSON.stringify({ sessionIds }, null, 2));
+    } catch (err) {
+      logger.error({ err }, "Failed to persist MCP sessions.");
+    }
+  };
 
   const mcpPostHandler = async (req: Request, res: Response): Promise<void> => {
     const sessionIdHeader = req.headers["mcp-session-id"];
@@ -40,11 +53,14 @@ export async function startMcpServer({
 
       if (sessionId) {
         transport = transportBySession[sessionId];
-      } else if (isInitializeRequest(req.body)) {
+      }
+      
+      if (!transport && isInitializeRequest(req.body)) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
             transportBySession[newSessionId] = transport as StreamableHTTPServerTransport;
+            saveSessions();
           }
         });
 
@@ -52,6 +68,7 @@ export async function startMcpServer({
           const sid = transport?.sessionId;
           if (sid && transportBySession[sid]) {
             delete transportBySession[sid];
+            saveSessions();
           }
         };
 
@@ -60,11 +77,11 @@ export async function startMcpServer({
       }
 
       if (!transport) {
-        res.status(400).json({
+        res.status(412).json({
           jsonrpc: "2.0",
           error: {
-            code: -32000,
-            message: "Bad Request: no valid MCP session found"
+            code: -32002,
+            message: "Session expired or invalid. Please re-initialize connection."
           },
           id: null
         });
